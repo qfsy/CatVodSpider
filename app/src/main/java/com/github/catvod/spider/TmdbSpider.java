@@ -1,5 +1,6 @@
 package com.github.catvod.spider;
 
+import android.text.TextUtils;
 import com.github.catvod.crawler.Spider;
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -18,7 +19,6 @@ public class TmdbSpider extends Spider {
     private static final String TMDB_DETAIL_IMG = "https://image.tmdb.org/t/p/w500";
     private static final String UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
     
-    // 采用 8 线程并发，平衡速度与安全
     private static final ExecutorService executor = Executors.newFixedThreadPool(8);
     private final ConcurrentHashMap<String, CacheEntry<JSONArray>> poolCache = new ConcurrentHashMap<>();
     
@@ -29,7 +29,6 @@ public class TmdbSpider extends Spider {
 
     @Override
     public void init(android.content.Context context, String extend) {
-        // 从配置 JSON 的 ext 字段读取 API Key
         if (extend != null && !extend.trim().isEmpty()) {
             this.dynamicApiKey = extend.trim();
         }
@@ -128,8 +127,9 @@ public class TmdbSpider extends Spider {
                 v.put("vod_id", type + "|" + item.optInt("id"));
                 v.put("vod_name", item.optString("name", item.optString("title")));
                 v.put("vod_pic", TMDB_IMAGE_BASE + item.optString("poster_path"));
-                String year = item.optString("first_air_date", item.optString("release_date", "    ")).substring(0, 4);
-                v.put("vod_remarks", "⭐" + String.format("%.1f", item.optDouble("vote_average")) + " | " + year);
+                String year = item.optString("first_air_date", item.optString("release_date", ""));
+                if (year.length() >= 4) year = year.substring(0, 4);
+                v.put("vod_remarks", "⭐" + String.format("%.1f", item.optDouble("vote_average")) + (year.isEmpty() ? "" : " | " + year));
                 return v;
             }));
         }
@@ -144,29 +144,69 @@ public class TmdbSpider extends Spider {
     public String detailContent(List<String> ids) throws Exception {
         if (ids == null || ids.isEmpty()) return "";
         String[] parts = ids.get(0).split("\\|");
+        String type = parts[0];
+        String tmdbId = parts[1];
+
         Map<String, String> params = new HashMap<>();
         params.put("language", "zh-CN");
         params.put("append_to_response", "credits");
-        JSONObject data = fetchTmdb("/" + parts[0] + "/" + parts[1], params);
+        JSONObject data = fetchTmdb("/" + type + "/" + tmdbId, params);
         if (data == null) return "";
+
+        // 解析演职员（参考 Bili.java 的逻辑增强数据丰富度）
+        String actor = "未知";
+        String director = "未知";
+        JSONObject credits = data.optJSONObject("credits");
+        if (credits != null) {
+            JSONArray cast = credits.optJSONArray("cast");
+            if (cast != null) {
+                List<String> actors = new ArrayList<>();
+                for (int i = 0; i < Math.min(cast.length(), 5); i++) actors.add(cast.getJSONObject(i).optString("name"));
+                actor = actors.isEmpty() ? "未知" : TextUtils.join(" / ", actors);
+            }
+            JSONArray crew = credits.optJSONArray("crew");
+            if (crew != null) {
+                for (int i = 0; i < crew.length(); i++) {
+                    if ("Director".equals(crew.getJSONObject(i).optString("job"))) {
+                        director = crew.getJSONObject(i).optString("name");
+                        break;
+                    }
+                }
+            }
+        }
+
         String title = data.optString("name", data.optString("title"));
         JSONObject vod = new JSONObject();
+        
+        // --- 核心改动：规范化字段名与类型，对齐 OK 影视解析器 ---
         vod.put("vod_id", ids.get(0));
         vod.put("vod_name", title);
         vod.put("vod_pic", TMDB_DETAIL_IMG + data.optString("poster_path"));
-        vod.put("vod_content", data.optString("overview", "暂无简介"));
-        vod.put("vod_play_from", "🔍 全网资源搜索");
-        vod.put("vod_play_url", "点击播放开启搜索$" + title);
+        vod.put("type_name", type.equals("tv") ? "电视剧" : "电影");
+        vod.put("vod_year", data.optString("first_air_date", data.optString("release_date", "    ")).substring(0, 4));
+        vod.put("vod_remarks", "⭐" + String.format("%.1f", data.optDouble("vote_average")));
+        vod.put("vod_actor", actor);
+        vod.put("vod_director", director);
+        vod.put("vod_content", data.optString("overview", "暂无简介").trim());
+        
+        // 模仿 Bili.java 的播放源结构
+        vod.put("vod_play_from", "TMDB_Search");
+        vod.put("vod_play_url", "🔍 全网资源搜索$" + "search://" + title);
+
         return new JSONObject().put("list", new JSONArray().put(vod)).toString();
     }
 
     @Override
     public String playerContent(String flag, String id, List<String> vipFlags) throws Exception {
-        String keyword = id.contains("$") ? id.split("\\$")[1] : id;
-        return new JSONObject().put("parse", 0).put("url", "").put("key", keyword).put("search", 1).toString();
+        if (id.startsWith("search://")) {
+            String keyword = id.substring(9);
+            return new JSONObject().put("parse", 0).put("url", "").put("key", keyword).put("search", 1).toString();
+        }
+        return new JSONObject().put("parse", 0).put("url", id).toString();
     }
 
     private JSONObject fetchTmdb(String endpoint, Map<String, String> params) throws Exception {
+        if (this.dynamicApiKey.isEmpty()) throw new Exception("API KEY IS MISSING");
         params.put("api_key", this.dynamicApiKey);
         StringBuilder sb = new StringBuilder();
         for (Map.Entry<String, String> entry : params.entrySet()) {
@@ -177,7 +217,7 @@ public class TmdbSpider extends Spider {
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestProperty("User-Agent", UA);
         conn.setConnectTimeout(3000);
-        Thread.sleep(new Random().nextInt(40) + 10); // 随机延迟防封
+        Thread.sleep(new Random().nextInt(40) + 10);
         BufferedReader in = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
         StringBuilder res = new StringBuilder();
         String line;
