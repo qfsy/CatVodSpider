@@ -67,54 +67,14 @@ public class TmdbSpider extends Spider {
         for (String[] p : PLATFORMS) {
             if (p[0].equals(tid)) { networkId = p[2]; break; }
         }
-        String sort = extend.getOrDefault("sort", "popularity.desc");
-        if ("vote_average.desc".equals(sort)) {
-            return getHighScorePage(tid, networkId, page);
-        }
         Map<String, String> params = new HashMap<>();
         params.put("with_networks", networkId);
         params.put("language", "zh-CN");
         params.put("page", String.valueOf(page));
-        params.put("sort_by", sort);
+        params.put("sort_by", extend.getOrDefault("sort", "popularity.desc"));
         JSONObject res = fetchTmdb("/discover/tv", params);
         JSONArray results = res.optJSONArray("results");
         return new JSONObject().put("page", page).put("pagecount", res.optInt("total_pages", page)).put("list", parallelProcessList(results, "tv")).toString();
-    }
-
-    private String getHighScorePage(String tid, String networkId, int page) throws Exception {
-        String cacheKey = "highscore_" + tid;
-        CacheEntry<JSONArray> entry = poolCache.get(cacheKey);
-        JSONArray fullList;
-        if (entry == null || entry.isExpired(600_000)) {
-            List<Future<JSONArray>> futures = new ArrayList<>();
-            for (int i = 1; i <= 10; i++) { 
-                final int p = i;
-                futures.add(executor.submit(() -> {
-                    Map<String, String> params = new HashMap<>();
-                    params.put("with_networks", networkId);
-                    params.put("language", "zh-CN");
-                    params.put("page", String.valueOf(p));
-                    params.put("vote_count.gte", "150");
-                    JSONObject r = fetchTmdb("/discover/tv", params);
-                    return r.optJSONArray("results");
-                }));
-            }
-            List<JSONObject> allItems = new ArrayList<>();
-            for (Future<JSONArray> f : futures) {
-                JSONArray arr = f.get();
-                if (arr != null) for (int j = 0; j < arr.length(); j++) allItems.add(arr.getJSONObject(j));
-            }
-            allItems.sort((a, b) -> Double.compare(b.optDouble("vote_average"), a.optDouble("vote_average")));
-            fullList = new JSONArray(allItems);
-            poolCache.put(cacheKey, new CacheEntry<>(fullList));
-        } else {
-            fullList = entry.value;
-        }
-        int start = (page - 1) * 20;
-        int end = Math.min(start + 20, fullList.length());
-        JSONArray slice = new JSONArray();
-        for (int i = start; i < end; i++) slice.put(fullList.get(i));
-        return new JSONObject().put("page", page).put("pagecount", (int) Math.ceil(fullList.length() / 20.0)).put("list", parallelProcessList(slice, "tv")).toString();
     }
 
     private JSONArray parallelProcessList(JSONArray results, String type) throws Exception {
@@ -157,32 +117,26 @@ public class TmdbSpider extends Spider {
         vod.put("vod_pic", TMDB_DETAIL_IMG + data.optString("poster_path"));
         vod.put("type_name", parts[0].equals("tv") ? "电视剧" : "电影");
         vod.put("vod_year", data.optString("first_air_date", data.optString("release_date", "    ")).substring(0, 4));
-        vod.put("vod_remarks", "⭐评分: " + String.format("%.1f", data.optDouble("vote_average")));
+        vod.put("vod_remarks", "⭐" + String.format("%.1f", data.optDouble("vote_average")));
         vod.put("vod_content", data.optString("overview", "暂无简介").trim());
         
-        // --- 核心优化：彻底解决自动跳转问题 ---
-        // 1. 设置一个独立的播放源名称
+        // --- 对齐官方文档：解决自动播放 ---
+        // SPIDER.md 规定了如果想要在 playerContent 触发 action，
+        // 我们给它一个线路名，地址设为关键词。
         vod.put("vod_play_from", "手动搜索");
-        // 2. 这里的 ID 设置为 "SEARCH_" + title。
-        // 因为没有 http 协议开头，软件不会认为它是“可播放地址”，从而不会触发自动播放逻辑。
-        vod.put("vod_play_url", "🔍 点击全网搜索$" + "SEARCH_" + title);
+        // 这里不传 URL 协议头，避免触发预加载播放器逻辑
+        vod.put("vod_play_url", "🔍点击搜索本站资源$" + title);
 
         return new JSONObject().put("list", new JSONArray().put(vod)).toString();
     }
 
     @Override
     public String playerContent(String flag, String id, List<String> vipFlags) throws Exception {
-        // 拦截点击事件
-        if (id.startsWith("SEARCH_")) {
-            String keyword = id.substring(7);
-            JSONObject result = new JSONObject();
-            result.put("parse", 0);   // 不解析
-            result.put("url", "");    // 留空地址防止进入播放器
-            result.put("key", keyword); // 关键：搜索词
-            result.put("search", 1);  // 强制重定向至搜索页
-            return result.toString();
-        }
-        return new JSONObject().put("parse", 0).put("url", id).toString();
+        // 按照 FongMi 文档规定：执行 action 操作
+        JSONObject result = new JSONObject();
+        result.put("action", "search"); // 指定跳转到搜索页
+        result.put("key", id);          // 搜索关键词（即 detailContent 传入的 title）
+        return result.toString();
     }
 
     private JSONObject fetchTmdb(String endpoint, Map<String, String> params) throws Exception {
