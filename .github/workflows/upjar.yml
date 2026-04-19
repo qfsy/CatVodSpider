@@ -9,15 +9,14 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: set up JDK 11
+      - name: set up JDK 17
         uses: actions/setup-java@v2
         with:
-          java-version: '11'
+          java-version: '17' # 必须为 17 以匹配新的安卓插件
           distribution: 'adopt'
-          # 删除了 cache: gradle 这一行，彻底避开 Cache 400 错误
 
       - name: Build with Gradle
-        # 确保你的项目根目录下有 build.bat
+        # 这一步会调用 build.bat，内部会执行 gradlew assembleRelease
         run: ./build.bat ec
 
       - name: Update spider jar
@@ -25,5 +24,5 @@ jobs:
         with:
           default_author: github_actions
           message: 'update spider jar'
-          # 确认你的 build.bat 确实会将生成的 jar 放到 ./jar/ 目录下
+          # 提交生成的 pp.jar 及其 md5
           add: "['./jar/pp.jar', './jar/pp.jar.md5']"
