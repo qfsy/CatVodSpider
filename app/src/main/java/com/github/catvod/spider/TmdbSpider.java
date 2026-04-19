@@ -160,24 +160,29 @@ public class TmdbSpider extends Spider {
         vod.put("vod_remarks", "⭐评分: " + String.format("%.1f", data.optDouble("vote_average")));
         vod.put("vod_content", data.optString("overview", "暂无简介").trim());
         
-        // --- 核心修改：防止自动跳转搜索 ---
-        // 我们不在这里使用 search:// 协议，而是使用一个伪协议名
-        vod.put("vod_play_from", "TMDB_Info");
-        // 链接名设为按钮名称，ID 设为 title。软件会认为这是个普通链接，停留在详情页。
-        vod.put("vod_play_url", "手动点击🔍全网搜索$" + title);
+        // --- 核心优化：彻底解决自动跳转问题 ---
+        // 1. 设置一个独立的播放源名称
+        vod.put("vod_play_from", "手动搜索");
+        // 2. 这里的 ID 设置为 "SEARCH_" + title。
+        // 因为没有 http 协议开头，软件不会认为它是“可播放地址”，从而不会触发自动播放逻辑。
+        vod.put("vod_play_url", "🔍 点击全网搜索$" + "SEARCH_" + title);
 
         return new JSONObject().put("list", new JSONArray().put(vod)).toString();
     }
 
     @Override
     public String playerContent(String flag, String id, List<String> vipFlags) throws Exception {
-        // 只有当用户在详情页点击“手动点击🔍全网搜索”按钮后，才会触发这里的逻辑
-        return new JSONObject()
-                .put("parse", 0)
-                .put("url", "")
-                .put("key", id)   // 此处的 id 即为上面的 title
-                .put("search", 1) // 此时才正式告知软件去搜索
-                .toString();
+        // 拦截点击事件
+        if (id.startsWith("SEARCH_")) {
+            String keyword = id.substring(7);
+            JSONObject result = new JSONObject();
+            result.put("parse", 0);   // 不解析
+            result.put("url", "");    // 留空地址防止进入播放器
+            result.put("key", keyword); // 关键：搜索词
+            result.put("search", 1);  // 强制重定向至搜索页
+            return result.toString();
+        }
+        return new JSONObject().put("parse", 0).put("url", id).toString();
     }
 
     private JSONObject fetchTmdb(String endpoint, Map<String, String> params) throws Exception {
